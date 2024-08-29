@@ -1,6 +1,33 @@
 <header class='row'>
   <div class='col-sm-5 pull-left'>
-    <h3><%= t('CronJobs') %></h3>
+    <h3><%= t('CronJobs') %> (<%= @total_size %>)</h3>
+    <% if @cron_jobs.size > 0 && @total_size > @per_page %>
+      <div>
+        <% if @total_size > @per_page %>
+          <ul class="pagination flip">
+            <li class="<%= 'disabled' if @page == 1 %>">
+              <a href="?page=1">&laquo;</a>
+            </li>
+            <% if @page > 1 %>
+              <li>
+                <a href="?page=<%= @page - 1 %>"><%= @page - 1 %></a>
+              </li>
+            <% end %>
+            <li class="disabled">
+              <a href="?page=<%= @page %>"><%= @page %></a>
+            </li>
+            <% if @total_size > @page * @per_page %>
+              <li>
+                <a href="?page=<%= @page + 1 %>"><%= @page + 1 %></a>
+              </li>
+            <% end %>
+            <li class="<%= 'disabled' if @total_size <= @page * @per_page %>">
+              <a href="?page=<%= (@total_size.to_f / @per_page).ceil %>">&raquo;</a>
+            </li>
+          </ul>
+        <% end %>
+      </div>
+    <% end %>
   </div>
   <div class='col-sm-7 pull-right' style="margin-top: 20px; margin-bottom: 10px;">
     <% if @cron_jobs.size > 0 %>
@@ -36,7 +63,7 @@
     </thead>
 
     <tbody>
-      <% @cron_jobs.sort{|a,b| a.sort_name <=> b.sort_name }.each_with_index do |job, index| %>
+      <% @cron_jobs.each_with_index do |job, index| %>
         <% style = "#{job.status == 'disabled' ? "background: #ecc; color: #585454;": ""}" %>
         <tr>
           <td style="<%= style %>"><%= t job.status %></td>

@@ -213,10 +213,10 @@ module Sidekiq
       end
 
       # Get all cron jobs.
-      def self.all
+      def self.all(offset: 0, limit: -1)
         job_hashes = nil
         Sidekiq.redis do |conn|
-          set_members = conn.smembers(jobs_key)
+          set_members = conn.zrange(jobs_key, offset, limit)
           job_hashes = conn.pipelined do |pipeline|
             set_members.each do |key|
               pipeline.hgetall(key)
@@ -232,7 +232,7 @@ module Sidekiq
       def self.count
         out = 0
         Sidekiq.redis do |conn|
-          out = conn.scard(jobs_key)
+          out = conn.zcard(jobs_key)
         end
         out
       end
@@ -466,15 +466,15 @@ module Sidekiq
         return false unless valid?
 
         Sidekiq.redis do |conn|
+          time = Time.now.utc
 
           # Add to set of all jobs
-          conn.sadd self.class.jobs_key, [redis_key]
+          conn.zadd self.class.jobs_key, time.to_f.to_s, [redis_key]
 
           # Add informations for this job!
           conn.hset redis_key, to_hash.transform_values! { |v| v || "" }
 
           # Add information about last time! - don't enque right after scheduler poller starts!
-          time = Time.now.utc
           exists = conn.public_send(REDIS_EXISTS_METHOD, job_enqueued_key)
           conn.zadd(job_enqueued_key, time.to_f.to_s, formatted_last_time(time).to_s) unless exists == true || exists == 1
         end
@@ -506,7 +506,7 @@ module Sidekiq
       def destroy
         Sidekiq.redis do |conn|
           # Delete from set.
-          conn.srem self.class.jobs_key, [redis_key]
+          conn.zrem self.class.jobs_key, [redis_key]
 
           # Delete runned timestamps.
           conn.del job_enqueued_key

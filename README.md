@@ -279,6 +279,9 @@ end
 # return array of all jobs
 Sidekiq::Cron::Job.all
 
+# return array of jobs by offset and limit
+Sidekiq::Cron::Job.all(offset: 0, limit: 9)
+
 # return one job by its unique name - case sensitive
 Sidekiq::Cron::Job.find "Job Name"
 

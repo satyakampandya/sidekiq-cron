@@ -9,7 +9,7 @@ module Sidekiq
           view_path    = File.join(File.expand_path("..", __FILE__), "views")
 
           @page = params[:page].to_i
-          @page = 1 if @page < 1  # Ensure the page number is at least 1
+          @page = 1 if @page < 1
 
           @per_page = params[:per_page].to_i
           @per_page = 25 if @per_page < 1
@@ -18,7 +18,7 @@ module Sidekiq
           ending_index = starting_index + @per_page - 1
 
           @total_size = Sidekiq::Cron::Job.count
-          @cron_jobs = Sidekiq::Cron::Job.all[starting_index..ending_index]
+          @cron_jobs = Sidekiq::Cron::Job.all(offset: starting_index, limit: ending_index)
 
           render(:erb, File.read(File.join(view_path, "cron.erb")))
         end

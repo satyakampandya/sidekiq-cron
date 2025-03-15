@@ -18,7 +18,7 @@ module Sidekiq
       GLOBALID_KEY = "_sc_globalid"
 
       attr_accessor :name, :namespace, :cron, :description, :klass, :args, :message
-      attr_reader   :last_enqueue_time, :fetch_missing_args, :source
+      attr_reader   :cron_expression_string, :last_enqueue_time, :fetch_missing_args, :source
 
       def initialize input_args = {}
         args = Hash[input_args.map{ |k, v| [k.to_s, v] }]
@@ -26,10 +26,16 @@ module Sidekiq
         @fetch_missing_args = true if @fetch_missing_args.nil?
 
         @name = args["name"]
-        @namespace = args["namespace"] || Sidekiq::Cron.configuration.default_namespace
         @cron = args["cron"]
         @description = args["description"] if args["description"]
         @source = args["source"] == "schedule" ? "schedule" : "dynamic"
+
+        default_namespace = Sidekiq::Cron.configuration.default_namespace
+        @namespace = args["namespace"] || default_namespace
+        if Sidekiq::Cron::Namespace.available_namespaces_provided? && !Sidekiq::Cron::Namespace.all.include?(@namespace) && @namespace != default_namespace
+          Sidekiq.logger.warn { "Cron Jobs - unexpected namespace #{@namespace} encountered. Assigning to default namespace." }
+          @namespace = default_namespace
+        end
 
         # Get class from klass or class.
         @klass = args["klass"] || args["class"]
@@ -61,6 +67,7 @@ module Sidekiq
           @message = args["message"]
           message_data = Sidekiq.load_json(@message) || {}
           @queue = message_data['queue'] || "default"
+          @retry = message_data['retry']
         elsif @klass
           message_data = {
             "class" => @klass.to_s,
@@ -69,15 +76,21 @@ module Sidekiq
 
           # Get right data for message,
           # only if message wasn't specified before.
-          klass_data = get_job_class_options(@klass)
+          klass_data = get_job_options(@klass, @args)
           message_data = klass_data.merge(message_data)
 
-          # Override queue if set in config,
+          # Override queue and retry if set in config,
           # only if message is hash - can be string (dumped JSON).
           if args['queue']
             @queue = message_data['queue'] = args['queue']
           else
             @queue = message_data['queue'] || "default"
+          end
+
+          if args['retry'] != nil
+            @retry = message_data['retry'] = args['retry']
+          else
+            @retry = message_data['retry']
           end
 
           @message = message_data
@@ -119,12 +132,7 @@ module Sidekiq
       def enqueue! time = Time.now.utc
         @last_enqueue_time = time
 
-        klass_const =
-            begin
-              Sidekiq::Cron::Support.constantize(@klass.to_s)
-            rescue NameError
-              nil
-            end
+        klass_const = Sidekiq::Cron::Support.safe_constantize(@klass.to_s)
 
         jid =
           if klass_const
@@ -147,9 +155,10 @@ module Sidekiq
       end
 
       def is_active_job?(klass = nil)
-        @active_job || defined?(ActiveJob::Base) && (klass || Sidekiq::Cron::Support.constantize(@klass.to_s)) < ActiveJob::Base
-      rescue NameError
-        false
+        @active_job || defined?(::ActiveJob::Base) && begin
+                                                        klass ||= Sidekiq::Cron::Support.safe_constantize(@klass.to_s)
+                                                        klass ? klass < ::ActiveJob::Base : false
+                                                      end
       end
 
       def date_as_argument?
@@ -166,7 +175,7 @@ module Sidekiq
       end
 
       def enqueue_sidekiq_worker(klass_const)
-        klass_const.set(queue: queue_name_with_prefix).perform_async(*enqueue_args)
+        klass_const.set(queue: queue_name_with_prefix, retry: @retry).perform_async(*enqueue_args)
       end
 
       # Sidekiq worker message.
@@ -181,16 +190,16 @@ module Sidekiq
 
         if !"#{@active_job_queue_name_delimiter}".empty?
           queue_name_delimiter = @active_job_queue_name_delimiter
-        elsif defined?(ActiveJob::Base) && defined?(ActiveJob::Base.queue_name_delimiter) && !ActiveJob::Base.queue_name_delimiter.empty?
-          queue_name_delimiter = ActiveJob::Base.queue_name_delimiter
+        elsif defined?(::ActiveJob::Base) && defined?(::ActiveJob::Base.queue_name_delimiter) && !::ActiveJob::Base.queue_name_delimiter.empty?
+          queue_name_delimiter = ::ActiveJob::Base.queue_name_delimiter
         else
           queue_name_delimiter = '_'
         end
 
         if !"#{@active_job_queue_name_prefix}".empty?
           queue_name = "#{@active_job_queue_name_prefix}#{queue_name_delimiter}#{@queue}"
-        elsif defined?(ActiveJob::Base) && defined?(ActiveJob::Base.queue_name_prefix) && !"#{ActiveJob::Base.queue_name_prefix}".empty?
-          queue_name = "#{ActiveJob::Base.queue_name_prefix}#{queue_name_delimiter}#{@queue}"
+        elsif defined?(::ActiveJob::Base) && defined?(::ActiveJob::Base.queue_name_prefix) && !"#{::ActiveJob::Base.queue_name_prefix}".empty?
+          queue_name = "#{::ActiveJob::Base.queue_name_prefix}#{queue_name_delimiter}#{@queue}"
         else
           queue_name = @queue
         end
@@ -422,6 +431,7 @@ module Sidekiq
           active_job: @active_job ? "1" : "0",
           queue_name_prefix: @active_job_queue_name_prefix,
           queue_name_delimiter: @active_job_queue_name_delimiter,
+          retry: @retry.nil? || @retry.is_a?(Numeric) ? @retry : @retry.to_s,
           last_enqueue_time: serialized_last_enqueue_time,
           symbolize_args: symbolize_args? ? "1" : "0",
         }
@@ -586,6 +596,10 @@ module Sidekiq
         @args = parse_args(args)
       end
 
+      def cron_expression_string
+        parsed_cron.to_cron_s
+      end
+
       private
 
       def parsed_cron
@@ -679,7 +693,7 @@ module Sidekiq
       def self.job_keys_from_namespace(namespace = Sidekiq::Cron.configuration.default_namespace)
         Sidekiq.redis do |conn|
           if namespace == '*'
-            namespaces = conn.keys(jobs_key(namespace))
+            namespaces = Sidekiq::Cron.configuration.available_namespaces&.map { jobs_key(_1) } || conn.keys(jobs_key(namespace))
             namespaces.flat_map { |name| conn.smembers(name) }
           else
             conn.smembers(jobs_key(namespace))
@@ -785,18 +799,16 @@ module Sidekiq
         end
       end
 
-      def get_job_class_options(klass)
-        klass = klass.is_a?(Class) ? klass : begin
-          Sidekiq::Cron::Support.constantize(klass)
-        rescue NameError
-          # noop
-        end
+      def get_job_options(klass, args)
+        klass = klass.is_a?(Class) ? klass : Sidekiq::Cron::Support.safe_constantize(klass)
 
         if klass.nil?
           # Unknown class
           {"queue"=>"default"}
         elsif is_active_job?(klass)
-          {"queue"=>klass.queue_name}
+          job = klass.new(args)
+
+          {"queue"=>job.queue_name}
         else
           klass.get_sidekiq_options
         end

@@ -1,7 +1,7 @@
 ![Sidekiq-Cron](logos/cover.png)
 
 [![Gem Version](https://badge.fury.io/rb/sidekiq-cron.svg)](https://badge.fury.io/rb/sidekiq-cron)
-[![Build Status](https://github.com/sidekiq-cron/sidekiq-cron/workflows/CI/badge.svg?branch=master)](https://github.com/sidekiq-cron/sidekiq-cron/actions)
+[![CI](https://github.com/sidekiq-cron/sidekiq-cron/actions/workflows/ci.yml/badge.svg)](https://github.com/sidekiq-cron/sidekiq-cron/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/sidekiq-cron/sidekiq-cron/branch/master/graph/badge.svg?token=VK9IVLIaY8)](https://codecov.io/gh/sidekiq-cron/sidekiq-cron)
 
 > A scheduling add-on for [Sidekiq](https://sidekiq.org/)
@@ -50,6 +50,7 @@ gem "sidekiq-cron"
   'namespace' => 'YourNamespace', # groups jobs together in a namespace (Default value is 'default'),
   'source' => 'dynamic', # source of the job, `schedule`/`dynamic` (default: `dynamic`)
   'queue' => 'name of queue',
+  'retry' => '5', # Sidekiq (not supported by ActiveJob) number of retries, or false to discard on first failure
   'args' => '[Array or Hash] of arguments which will be passed to perform method',
   'date_as_argument' => true, # add the time of execution as last argument of the perform method
   'active_job' => true,  # enqueue job through Active Job interface
@@ -72,6 +73,7 @@ Sidekiq::Cron.configure do |config|
   config.cron_schedule_file = 'config/my_schedule.yml' # Default is 'config/schedule.yml'
   config.cron_history_size = 20 # Default is 10
   config.default_namespace = 'statistics' # Default is 'default'
+  config.available_namespaces = %w[statistics maintenance billing] # Default is `nil`
   config.natural_cron_parsing_mode = :strict # Default is :single
   config.reschedule_grace_period = 300 # Default is 60
 end
@@ -164,6 +166,24 @@ Sidekiq::Cron.configure do |config|
   config.default_namespace = 'statics'
 end
 ```
+
+#### Renaming namespace
+
+If you rename the namespace of a job that is already running, the gem will not automatically delete the cron job associated with the old namespace. This means you could end up with two cron jobs running simultaneously.
+
+To avoid this, it is recommended to delete all existing cron jobs associated with the old namespace before making the change. You can achieve this with the following code:
+
+```ruby
+Sidekiq::Cron::Job.all('YOUR_OLD_NAMESPACE_NAME').each { |job| job.destroy }
+```
+
+#### Available namespaces
+
+By default, Sidekiq Cron retrieves all existing jobs from Redis to determine the namespaces your application uses. However, this approach may not be suitable for large Redis installations. To address this, you can explicitly specify the list of available namespaces using the `available_namespaces` configuration option.
+
+If `available_namespaces` is set and a job is created with an unexpected namespace, a warning will be printed, and the job will be assigned to the default namespace.
+
+For more details and discussion, see [this issue](https://github.com/sidekiq-cron/sidekiq-cron/issues/516).
 
 #### Usage
 

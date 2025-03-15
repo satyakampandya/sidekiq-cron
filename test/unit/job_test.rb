@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require './test/test_helper'
-require "./test/models/person"
 
 describe "Cron Job" do
   before do
@@ -154,6 +153,29 @@ describe "Cron Job" do
         assert @job.to_hash.has_key?(key), "to_hash must have key: #{key}"
       end
     end
+
+    it "warns about unexpected namespace and fallbacks to default one" do
+      Sidekiq::Cron.configuration.available_namespaces = %w[namespace1 namespace2]
+
+      output = capture_logging(level: Logger::Severity::WARN) do
+        @job = Sidekiq::Cron::Job.new(@args.merge(namespace: "namespace"))
+      end
+
+      assert_equal "default", @job.namespace
+      assert_match(/WARN -- : Cron Jobs - unexpected namespace namespace encountered. Assigning to default namespace./, output)
+    end
+
+    it "does not warn on assigning default namespace which is not listed in `available_namespaces`" do
+      Sidekiq::Cron.configuration.available_namespaces = %w[namespace1 namespace2]
+
+      output = capture_logging(level: Logger::Severity::WARN) do
+        @job = Sidekiq::Cron::Job.new(@args.merge(namespace: "default"))
+      end
+
+      assert_equal "default", @job.namespace
+
+      assert_equal "", output
+    end
   end
 
   describe 'cron formats' do
@@ -287,6 +309,23 @@ describe "Cron Job" do
                                  "args"=>[]}
     end
 
+    it "be initialized with 'class' and overwrite retry by settings" do
+      job = Sidekiq::Cron::Job.new('class' => CronTestClassWithQueue, retry: 5)
+
+      assert_equal job.message, {"retry"=>5,
+                                 "queue"=>:super,
+                                 "backtrace"=>true,
+                                 "class"=>"CronTestClassWithQueue",
+                                 "args"=>[]}
+
+      job = Sidekiq::Cron::Job.new('class' => CronTestClass, retry: false)
+
+      assert_equal job.message, {"retry"=>false,
+                                 "queue"=>"default",
+                                 "class"=>"CronTestClass",
+                                 "args"=>[]}
+    end
+
     it "be initialized with 'class' and date_as_argument" do
       job = Sidekiq::Cron::Job.new('class' => 'CronTestClassWithQueue', "date_as_argument" => true)
 
@@ -328,7 +367,7 @@ describe "Cron Job" do
 
       it "be initialized with class specified attributes" do
         job = Sidekiq::Cron::Job.new('class' => 'ActiveJobCronTestClassWithQueue')
-        assert_equal job.message, {"queue"=>:super, "class"=>"ActiveJobCronTestClassWithQueue", "args"=>[]}
+        assert_equal job.message, {"queue"=>"super", "class"=>"ActiveJobCronTestClassWithQueue", "args"=>[]}
       end
     end
   end
@@ -507,10 +546,34 @@ describe "Cron Job" do
     end
   end
 
+  describe '#sidekiq_worker_message settings overwrite retry name' do
+    before do
+      @args = {
+        name:  'Test',
+        cron:  '* * * * *',
+        retry: 5,
+        klass: 'CronTestClassWithQueue',
+        args:  { foo: 'bar' }
+      }
+      @job = Sidekiq::Cron::Job.new(@args)
+    end
+
+    it 'should return valid payload for Sidekiq::Client with overwrite retry' do
+      payload = {
+        "retry" => 5,
+        "backtrace" => true,
+        "queue" => :super,
+        "class" => "CronTestClassWithQueue",
+        "args"  => [{:foo=>"bar"}]
+      }
+      assert_equal @job.sidekiq_worker_message, payload
+    end
+  end
+
   describe '#active_job_message' do
     before do
       SecureRandom.stubs(:uuid).returns('XYZ')
-      ActiveJob::Base.queue_name_prefix = ''
+      ::ActiveJob::Base.queue_name_prefix = ''
 
       @args = {
         name:  'Test',
@@ -559,7 +622,7 @@ describe "Cron Job" do
   describe '#active_job_message - unknown Active Job Worker class' do
     before do
       SecureRandom.stubs(:uuid).returns('XYZ')
-      ActiveJob::Base.queue_name_prefix = ''
+      ::ActiveJob::Base.queue_name_prefix = ''
 
       @args = {
         name:  'Test',
@@ -593,7 +656,7 @@ describe "Cron Job" do
   describe '#active_job_message with symbolize_args (hash)' do
     before do
       SecureRandom.stubs(:uuid).returns('XYZ')
-      ActiveJob::Base.queue_name_prefix = ''
+      ::ActiveJob::Base.queue_name_prefix = ''
 
       @args = {
         name:  'Test',
@@ -627,7 +690,7 @@ describe "Cron Job" do
   describe '#active_job_message with symbolize_args (array)' do
     before do
       SecureRandom.stubs(:uuid).returns('XYZ')
-      ActiveJob::Base.queue_name_prefix = ''
+      ::ActiveJob::Base.queue_name_prefix = ''
 
       @args = {
         name:  'Test',
@@ -661,7 +724,8 @@ describe "Cron Job" do
   describe '#active_job_message with queue_name_prefix' do
     before do
       SecureRandom.stubs(:uuid).returns('XYZ')
-      ActiveJob::Base.queue_name_prefix = "prefix"
+      @original_queue_name_prefix = ::ActiveJob::Base.queue_name_prefix
+      ::ActiveJob::Base.queue_name_prefix = "prefix"
 
       @args = {
         name:  'Test',
@@ -672,6 +736,10 @@ describe "Cron Job" do
         args:  { foo: 'bar' }
       }
       @job = Sidekiq::Cron::Job.new(@args)
+    end
+
+    after do
+      ::ActiveJob::Base.queue_name_prefix = @original_queue_name_prefix
     end
 
     it 'should return valid payload for Sidekiq::Client' do
@@ -715,12 +783,21 @@ describe "Cron Job" do
         end
 
         it 'should add timestamp to args' do
-          ActiveJobCronTestClass.expects(:perform_later)
-                                .returns(ActiveJobCronTestClass.new)
-                                .with { |*args|
-                                  assert args[-1].is_a?(Float)
-                                  assert args[-1].between?(Time.now.to_f - 1, Time.now.to_f)
+          job = ActiveJobCronTestClass.new
+
+          ActiveJobCronTestClass.expects(:set)
+                                .returns(job)
+                                .with { |**args|
+                                  assert_equal 'default', args[:queue]
                                 }
+
+          job.expects(:perform_later)
+             .returns(job)
+             .with { |*args|
+               assert args[-1].is_a?(Float)
+               assert args[-1].between?(Time.now.to_f - 1, Time.now.to_f)
+             }
+
           @job.enqueue!
         end
       end
@@ -1202,6 +1279,16 @@ describe "Cron Job" do
       describe 'when passing an asterisk' do
         it 'should return all the existing jobs from all namespaces and out of a namespace' do
           assert_equal Sidekiq::Cron::Job.all('*').size, 3, 'Should have 3 jobs'
+        end
+      end
+
+      describe 'with explicitly provided available namespaces' do
+        it 'should return all the jobs only from available namespaces' do
+          Sidekiq::Cron.configuration.available_namespaces = %w[default]
+          assert_equal 2, Sidekiq::Cron::Job.all('*').size, 'Should have 2 jobs'
+
+          Sidekiq::Cron.configuration.available_namespaces = [custom_namespace]
+          assert_equal 1, Sidekiq::Cron::Job.all('*').size, 'Should have 1 job'
         end
       end
     end

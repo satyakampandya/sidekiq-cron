@@ -28,6 +28,17 @@ module Sidekiq
       # The default namespace is used when no namespace is specified.
       attr_accessor :default_namespace
 
+      # List of available namespaces
+      #
+      # If not set, Sidekiq Cron will dynamically fetch available namespaces
+      # by retrieving existing jobs from Redis.
+      #
+      # This dynamic fetching can negatively impact performance in certain cases.
+      # To mitigate this, you can provide the list of namespaces explicitly.
+      # If a job specifies a namespace that is not included in the provided list,
+      # a warning will be logged, and the job will be assigned to the default namespace.
+      attr_accessor :available_namespaces
+
       # The parsing mode when using the natural language cron syntax from the `fugit` gem.
       #
       # :single -- use the first parsed cron line and ignore the rest (default)
@@ -47,6 +58,7 @@ module Sidekiq
         @cron_schedule_file = 'config/schedule.yml'
         @cron_history_size = 10
         @default_namespace = 'default'
+        @available_namespaces = nil
         @natural_cron_parsing_mode = :single
         @reschedule_grace_period = 60
       end
